@@ -1,0 +1,123 @@
+concurrency:
+  group: download-${{ github.ref }}
+  cancel-in-progress: false
+name: '📦 حرفه‌ای: دانلود و ذخیره در مخزن'
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_urls:
+        description: '🔗 لینک مستقیم فایل‌ها (با کاما جدا کنید) مثال: url1,url2,url3'
+        required: true
+        type: string
+        default: 'LINK1,LINK2,LINK3'
+      password:
+        description: '🔐 رمز فایل فشرده (اختیاری)'
+        required: false
+        type: string
+        default: ''
+      split_size:
+        description: '📦 حجم هر تکه (پیش‌فرض: 95m)'
+        required: false
+        type: string
+        default: '95m'
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔄 دریافت کد مخزن
+        uses: actions/checkout@v4
+
+      - name: ⚙️ نصب ابزارها
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full file
+
+      - name: 📥 پردازش و دانلود همه فایل‌ها
+        id: process
+        run: |
+          # تبدیل ورودی به فایل (یک URL در هر خط)
+          echo "${{ github.event.inputs.file_urls }}" | sed 's/,https/\nhttps/g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' > /tmp/urls.txt
+          
+          # حداکثر دانلود همزمان (بین 5 تا 10 تنظیم کنید)
+          MAX_PARALLEL=8
+          
+          # تابع پردازش هر URL (در زیرپردازه اجرا می‌شود)
+          process_url() {
+            URL="$1"
+            echo "🔽 شروع دانلود: $URL"
+            
+            # استخراج نام فایل از لینک
+            FILENAME=$(basename "$URL" | sed 's/\?.*//;s/%20/ /g')
+            [ -z "$FILENAME" ] && FILENAME="downloaded_$(date +%s)_$RANDOM"
+            
+            SAFE_FILENAME=$(echo "$FILENAME" | sed 's/[\\/:*?"<>|]/_/g')
+            
+            # دانلود فایل در یک فایل موقت یکتا
+            TMP_DOWNLOAD=$(mktemp --suffix="-$SAFE_FILENAME")   # مثلاً /tmp/tmp.XXXXXX--225856506_456240132.mp4
+            curl -L --fail --retry 3 --retry-delay 2 --progress-bar -o "$TMP_DOWNLOAD" "$URL"
+            if [ $? -ne 0 ]; then
+              echo "❌ خطا در دانلود: $URL"
+              rm -f "$TMP_DOWNLOAD"
+              return 1
+            fi
+            echo "✅ دریافت شد: $SAFE_FILENAME"
+            
+            # تشخیص نوع فایل و دسته‌بندی
+            MIME=$(file -b --mime-type -- "$TMP_DOWNLOAD")
+            EXT="${SAFE_FILENAME##*.}"
+            EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
+            
+            if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
+              CAT="video"
+            elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
+              CAT="audio"
+            elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then
+              CAT="image"
+            elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then
+              CAT="document"
+            else
+              CAT="other"
+            fi
+            
+            # ساخت یک پوشه یکتا با mktemp (بدون تداخل بین پردازه‌های موازی)
+            mkdir -p "downloads/$CAT"
+            FINAL_DIR=$(mktemp -d "downloads/$CAT/${SAFE_FILENAME%.*}_XXXXXX")  # مثلاً downloads/video/vid_720p_aBcDeF
+            # اگر mktemp با پسوند کار نکرد، یک روش جایگزین
+            # FINAL_DIR="downloads/$CAT/${SAFE_FILENAME%.*}_$(date +%s%N)_$$"
+            # mkdir -p "$FINAL_DIR"
+            
+            # فشرده‌سازی و تقسیم فایل
+            if [ -z "${{ github.event.inputs.password }}" ]; then
+              7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
+            else
+              7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
+            fi
+            
+            echo "✅ ذخیره شد: $FINAL_DIR ← $SAFE_FILENAME"
+            
+            # حذف فایل دانلود موقت
+            rm -f -- "$TMP_DOWNLOAD"
+          }
+          
+          export -f process_url
+          
+          # اجرای موازی با xargs
+          cat /tmp/urls.txt | xargs -I {} -P $MAX_PARALLEL bash -c 'process_url "$@"' _ {}
+          
+          echo "🎉 همه لینک‌ها پردازش شدند."
+      - name: 📝 کامیت و پوش به مخزن
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add downloads/
+          git commit -m "Add multiple files [$(date +'%Y-%m-%d %H:%M')]" || echo "Nothing to commit"
+          
+          # جدید: ابتدا آخرین تغییرات ریموت را دریافت کن
+          git pull --rebase origin main
+          
+          git push
