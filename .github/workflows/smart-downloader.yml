@@ -2,16 +2,16 @@ concurrency:
   group: download-${{ github.ref }}
   cancel-in-progress: false
 
-name: '📦 حرفه‌ای: دانلود و ذخیره در مخزن (ترتیبی و ایمن)'
+name: '📦 حرفه‌ای: دانلود همزمان و پوش مجزا'
 
 on:
   workflow_dispatch:
     inputs:
       file_urls:
-        description: '🔗 لینک مستقیم فایل‌ها (با کاما جدا کنید) مثال: url1,url2,url3'
+        description: '🔗 لینک‌ها (با "فاصله" یا "اینتر" جدا کنید، نه کاما!)'
         required: true
         type: string
-        default: 'LINK1,LINK2,LINK3'
+        default: 'LINK1 LINK2'
       password:
         description: '🔐 رمز فایل فشرده (اختیاری)'
         required: false
@@ -38,110 +38,123 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y p7zip-full file
 
-      - name: 🔍 نمایش و بررسی لینک‌های ورودی
+      - name: 🔍 پیش‌نمایش لینک‌های ورودی
         run: |
           echo "=========================================="
-          echo "📋 لیست لینک‌هایی که برای دانلود وارد کرده‌اید:"
+          echo "📋 لیست لینک‌هایی که پردازش خواهند شد:"
           echo "=========================================="
-          echo "${{ github.event.inputs.file_urls }}" | sed 's/,/\n/g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d'
+          # جداسازی بر اساس فاصله یا خط جدید (کاماهای داخل لینک دست نخورده می‌مانند)
+          echo "${{ github.event.inputs.file_urls }}" | awk '{for(i=1;i<=NF;i++) print $i}'
           echo "=========================================="
 
-      - name: 📥 پردازش، دانلود و پوش مجزای فایل‌ها
+      - name: 📥 دانلود همزمان و پوش مجزا
         id: process
         run: |
-          # تنظیم مشخصات گیت برای کل فرآیند
+          # تنظیم مشخصات گیت
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # تبدیل ورودی به فایل (یک URL در هر خط)
-          echo "${{ github.event.inputs.file_urls }}" | sed 's/,/\n/g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' > /tmp/urls.txt
-
-          SUCCESS_COUNT=0
-          FAILED_COUNT=0
+          # استخراج لینک‌ها
+          echo "${{ github.event.inputs.file_urls }}" | awk '{for(i=1;i<=NF;i++) print $i}' > /tmp/urls.txt
+          
+          # ایجاد پوشه‌های موقت برای شمارش موفقیت/شکست در پردازش‌های موازی
+          mkdir -p /tmp/success_tracker
+          mkdir -p /tmp/fail_tracker
           touch /tmp/failed_links.txt
 
-          # خواندن خط به خط لینک‌ها به صورت ترتیبی
-          while IFS= read -r URL || [ -n "$URL" ]; do
-            echo "----------------------------------------"
-            echo "🔽 شروع فرآیند برای لینک: $URL"
+          # خروجی کردن متغیرها برای استفاده در زیرپردازه‌ها (Subshells)
+          export SPLIT_SIZE="${{ github.event.inputs.split_size }}"
+          export ZIP_PASS="${{ github.event.inputs.password }}"
+
+          process_url() {
+            URL="$1"
+            echo "🔽 شروع فرآیند: $URL"
             
-            # استخراج و ایمن‌سازی نام فایل
-            FILENAME=$(basename "$URL" | sed 's/\?.*//;s/%20/ /g')
-            [ -z "$FILENAME" ] && FILENAME="downloaded_$(date +%s)_$RANDOM"
+            # استخراج نام فایل و حذف پارامترهای اضافی در صورت وجود
+            FILENAME=$(basename "$URL" | awk -F'?' '{print $1}')
+            [ -z "$FILENAME" ] || [[ "$FILENAME" == *"="* ]] && FILENAME="downloaded_$(date +%s)_$RANDOM"
             SAFE_FILENAME=$(echo "$FILENAME" | sed 's/[\\/:*?"<>|]/_/g')
             
             TMP_DOWNLOAD=$(mktemp --suffix="-$SAFE_FILENAME")
             
-            # تلاش برای دانلود
+            # دانلود فایل
             if curl -L --fail --retry 3 --retry-delay 2 --progress-bar -o "$TMP_DOWNLOAD" "$URL"; then
-              echo "✅ دریافت شد: $SAFE_FILENAME"
+              echo "✅ دانلود شد: $SAFE_FILENAME"
               
-              # تشخیص نوع فایل و دسته‌بندی
               MIME=$(file -b --mime-type -- "$TMP_DOWNLOAD")
               EXT="${SAFE_FILENAME##*.}"
               EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
               
-              if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
-                CAT="video"
-              elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
-                CAT="audio"
-              elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then
-                CAT="image"
-              elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then
-                CAT="document"
-              else
-                CAT="other"
-              fi
+              if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then CAT="video"
+              elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then CAT="audio"
+              elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then CAT="image"
+              elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then CAT="document"
+              else CAT="other"; fi
               
               mkdir -p "downloads/$CAT"
               FINAL_DIR=$(mktemp -d "downloads/$CAT/${SAFE_FILENAME%.*}_XXXXXX")
               
-              # فشرده‌سازی و تکه‌تکه کردن
-              if [ -z "${{ github.event.inputs.password }}" ]; then
-                7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
+              # فشرده‌سازی
+              if [ -z "$ZIP_PASS" ]; then
+                7z a -mhe=on -mx=3 -v"$SPLIT_SIZE" "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
               else
-                7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
+                7z a -p"$ZIP_PASS" -mhe=on -mx=3 -v"$SPLIT_SIZE" "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
               fi
               
               rm -f -- "$TMP_DOWNLOAD"
-              echo "✅ فشرده‌سازی انجام شد: $FINAL_DIR"
               
-              # کامیت و پوش فوری همین فایل به مخزن
-              git add "$FINAL_DIR"
-              git commit -m "📦 افزوده شد: $SAFE_FILENAME [$(date +'%Y-%m-%d %H:%M')]"
-              
-              # دریافت آخرین تغییرات احتمالی و پوش
-              git pull --rebase origin main
-              git push origin HEAD:main
-              
-              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-              echo "🚀 فایل با موفقیت به ریپازیتوری منتقل شد."
+              # --- بخش حیاتی: پوش به مخزن با استفاده از قفل (flock) ---
+              # این بلاک اطمینان می‌دهد که در هر لحظه فقط یک فایل در حال پوش شدن است
+              (
+                flock -x 200
+                echo "🔒 در حال همگام‌سازی و پوش فایل: $SAFE_FILENAME"
+                git add "$FINAL_DIR"
+                git commit -m "📦 افزوده شد: $SAFE_FILENAME" || true
+                git pull --rebase origin main
+                git push origin HEAD:main
+                echo "🔓 پوش انجام شد. قفل آزاد شد."
+              ) 200>/tmp/git_push.lock
+              # -----------------------------------------------------
+
+              touch "/tmp/success_tracker/$RANDOM$RANDOM"
             else
-              echo "❌ خطا در دانلود این لینک: $URL"
-              echo "$URL" >> /tmp/failed_links.txt
-              FAILED_COUNT=$((FAILED_COUNT + 1))
+              echo "❌ خطا در دانلود: $URL"
+              # ثبت لینک خراب (استفاده از قفل برای جلوگیری از تداخل در نوشتن فایل متنی)
+              (
+                flock -x 200
+                echo "$URL" >> /tmp/failed_links.txt
+              ) 200>/tmp/git_push.lock
+              
+              touch "/tmp/fail_tracker/$RANDOM$RANDOM"
               rm -f "$TMP_DOWNLOAD"
             fi
-          done < /tmp/urls.txt
-
-          # مدیریت لینک‌های ناموفق در پایان کار
-          if [ $FAILED_COUNT -gt 0 ]; then
-            echo "📝 در حال ثبت لینک‌های ناموفق..."
-            mv /tmp/failed_links.txt ./failed_links.txt
-            git add failed_links.txt
-            git commit -m "⚠️ ثبت لینک‌های ناموفق در دانلود [$(date +'%Y-%m-%d %H:%M')]" || echo "No changes to commit"
-            git pull --rebase origin main
-            git push origin HEAD:main
-          fi
-
-          # بررسی وضعیت نهایی برای پاس یا رد شدن کل پایپ‌لاین
+          }
+          
+          export -f process_url
+          
+          # اجرای دانلودها به صورت همزمان (حداکثر 4 فایل همزمان برای جلوگیری از افت کیفیت سرورهای گیت‌هاب)
+          cat /tmp/urls.txt | xargs -n 1 -P 4 bash -c 'process_url "$@"' _
+          
+          # محاسبه آمار نهایی
+          SUCCESS_COUNT=$(ls -1q /tmp/success_tracker/ | wc -l)
+          FAILED_COUNT=$(ls -1q /tmp/fail_tracker/ | wc -l)
+          
           echo "=========================================="
           echo "📊 آمار نهایی: موفق ($SUCCESS_COUNT) | ناموفق ($FAILED_COUNT)"
           echo "=========================================="
           
-          if [ $SUCCESS_COUNT -eq 0 ]; then
-            echo "🛑 خطا: هیچ‌کدام از لینک‌ها با موفقیت دانلود نشدند!"
-            exit 1
+          # اگر لینکی خراب شده بود، فایل متنی آن پوش می‌شود
+          if [ $FAILED_COUNT -gt 0 ]; then
+            echo "📝 پوش کردن لیست لینک‌های ناموفق..."
+            mv /tmp/failed_links.txt ./failed_links.txt
+            git add failed_links.txt
+            git commit -m "⚠️ ثبت لینک‌های ناموفق در دانلود [$(date +'%Y-%m-%d %H:%M')]" || true
+            git pull --rebase origin main
+            git push origin HEAD:main
           fi
           
-          echo "🎉 عملیات کلی با موفقیت پایان یافت."
+          # در صورتی که همه لینک‌ها خطا داده باشند، اکشن Fail می‌شود
+          if [ $SUCCESS_COUNT -eq 0 ]; then
+            echo "🛑 خطا: تمام لینک‌ها با شکست مواجه شدند."
+            exit 1
+          fi
