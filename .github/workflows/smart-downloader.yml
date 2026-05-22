@@ -96,9 +96,9 @@ jobs:
               
               # فشرده‌سازی
               if [ -z "$ZIP_PASS" ]; then
-                7z a -mhe=on -mx=3 -v"$SPLIT_SIZE" "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
+                7z a -mhe=on -mx=0 -v"$SPLIT_SIZE" "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
               else
-                7z a -p"$ZIP_PASS" -mhe=on -mx=3 -v"$SPLIT_SIZE" "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
+                7z a -p"$ZIP_PASS" -mhe=on -mx=0 -v"$SPLIT_SIZE" "$FINAL_DIR/archive.7z" "$TMP_DOWNLOAD"
               fi
               
               rm -f -- "$TMP_DOWNLOAD"
@@ -133,7 +133,7 @@ jobs:
           export -f process_url
           
           # اجرای دانلودها به صورت همزمان (حداکثر 4 فایل همزمان برای جلوگیری از افت کیفیت سرورهای گیت‌هاب)
-          cat /tmp/urls.txt | xargs -n 1 -P 4 bash -c 'process_url "$@"' _
+          cat /tmp/urls.txt | xargs -n 1 -P 8 bash -c 'process_url "$@"' _
           
           # محاسبه آمار نهایی
           SUCCESS_COUNT=$(ls -1q /tmp/success_tracker/ | wc -l)
